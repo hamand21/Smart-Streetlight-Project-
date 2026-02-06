@@ -1,0 +1,297 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+/* ================= OLED ================= */
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+#define SDA_PIN 27
+#define SCL_PIN 14
+#define OLED_RESET -1
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+/* ================= PINS ================= */
+
+// Sensors
+#define LDR_PIN     34
+#define TRIG_PIN    26
+#define ECHO_PIN    25
+
+#define SOUND_DO    19
+#define SOUND_AO    35
+
+#define VIB_PIN     21
+
+// LED Zones (MOSFET Gates)
+#define LED_ZONE1   18
+#define LED_ZONE2   5
+
+// Relay
+#define RELAY_PIN   23
+
+
+/* ================= VARIABLES ================= */
+
+long duration;
+float distance;
+
+bool isNight = false;
+bool emergency = false;
+
+// Fade + Follow control
+unsigned long lastFadeTime = 0;
+int fadeValue = 0;
+bool fadeUp = true;
+int activeZone = 0;
+
+// OLED optimization
+String lastDisplay = "";
+
+
+/* ================= FUNCTIONS ================= */
+
+// Ultrasonic Distance
+float getDistance() {
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  duration = pulseIn(ECHO_PIN, HIGH, 30000);
+
+  if (duration == 0) return -1;
+
+  return duration * 0.034 / 2;
+}
+
+
+// OLED Update (No Lag)
+void updateOLED(String l1, String l2, String l3) {
+
+  String data = l1 + l2 + l3;
+
+  if (data == lastDisplay) return;
+
+  lastDisplay = data;
+
+  display.clearDisplay();
+
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.println(l1);
+
+  display.setCursor(0, 20);
+  display.println(l2);
+
+  display.setCursor(0, 40);
+  display.println(l3);
+
+  display.display();
+}
+
+
+/* ================= SETUP ================= */
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // OLED
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    while (1);
+  }
+
+  // Pins
+  pinMode(LDR_PIN, INPUT);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  pinMode(SOUND_DO, INPUT);
+  pinMode(VIB_PIN, INPUT);
+
+  pinMode(RELAY_PIN, OUTPUT);
+
+  digitalWrite(RELAY_PIN, LOW);
+
+  // PWM
+  ledcAttach(LED_ZONE1, 5000, 8);
+  ledcAttach(LED_ZONE2, 5000, 8);
+
+  updateOLED("Smart Street",
+             "System Ready",
+             "Initializing");
+
+  delay(2000);
+}
+
+
+/* ================= LOOP ================= */
+
+void loop() {
+
+  /* ---------- READ SENSORS ---------- */
+
+  int ldrVal = digitalRead(LDR_PIN);
+
+  int soundD = digitalRead(SOUND_DO);
+  int soundA = analogRead(SOUND_AO);
+
+  int vibVal = digitalRead(VIB_PIN);
+
+  distance = getDistance();
+
+
+  /* ---------- DAY / NIGHT ---------- */
+
+  // LDR: HIGH = Dark (Night), LOW = Day
+  isNight = (ldrVal == HIGH);
+
+
+  /* ---------- EMERGENCY ---------- */
+
+  emergency = false;
+
+  if ((soundD == 1 && soundA > 1600) || vibVal == 1) {
+    emergency = true;
+  }
+
+
+  /* ========== MAIN CONTROL ========== */
+
+  /* ===== EMERGENCY MODE ===== */
+
+  if (emergency) {
+
+    // All lights ON
+    ledcWrite(LED_ZONE1, 255);
+    ledcWrite(LED_ZONE2, 255);
+
+    // Relay ON
+    digitalWrite(RELAY_PIN, HIGH);
+
+    updateOLED("!!! EMERGENCY !!!",
+               "Accident Detected",
+               "Alert Active");
+
+    // Future: GSM / ESP32-CAM trigger here
+  }
+
+
+  /* ===== NIGHT MODE ===== */
+
+  else if (isNight) {
+
+    digitalWrite(RELAY_PIN, LOW);
+
+    // Movement Detected
+    if (distance > 0 && distance < 100) {
+
+      // Smooth Fade Control
+      if (millis() - lastFadeTime > 25) {
+
+        lastFadeTime = millis();
+
+        // Fade Up
+        if (fadeUp) {
+
+          fadeValue += 4;
+
+          if (fadeValue >= 255) {
+            fadeValue = 255;
+            fadeUp = false;
+          }
+        }
+
+        // Fade Down
+        else {
+
+          fadeValue -= 4;
+
+          if (fadeValue <= 0) {
+            fadeValue = 0;
+            fadeUp = true;
+
+            // Change Zone
+            activeZone = !activeZone;
+          }
+        }
+
+        // Apply Fade
+        if (activeZone == 0) {
+
+          ledcWrite(LED_ZONE1, fadeValue);
+          ledcWrite(LED_ZONE2, 50);
+
+        }
+        else {
+
+          ledcWrite(LED_ZONE1, 50);
+          ledcWrite(LED_ZONE2, fadeValue);
+        }
+      }
+
+      updateOLED("Night Mode",
+                 "Movement Found",
+                 "Flow Lighting");
+    }
+
+
+    // No Movement → DIM
+    else {
+
+      ledcWrite(LED_ZONE1, 80);
+      ledcWrite(LED_ZONE2, 80);
+
+      updateOLED("Night Mode",
+                 "No Movement",
+                 "Dim Lighting");
+    }
+
+  }
+
+
+  /* ===== DAY MODE ===== */
+
+  else {
+
+    // Lights OFF
+    ledcWrite(LED_ZONE1, 0);
+    ledcWrite(LED_ZONE2, 0);
+
+    digitalWrite(RELAY_PIN, LOW);
+
+    updateOLED("Day Mode",
+               "Sunlight OK",
+               "Lights OFF");
+  }
+
+
+  /* ---------- DEBUG ---------- */
+
+  Serial.print("LDR: ");
+  Serial.print(ldrVal);
+
+  Serial.print(" | Dist: ");
+  Serial.print(distance);
+
+  Serial.print(" | Sound: ");
+  Serial.print(soundA);
+
+  Serial.print(" | Vib: ");
+  Serial.println(vibVal);
+
+
+  delay(10); // Stability delay
+}
